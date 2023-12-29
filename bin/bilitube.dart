@@ -8,9 +8,9 @@ import 'package:args/args.dart';
 
 import 'package:bilitube/wbi.dart' show getWbiUri;
 
-const String version = '0.0.1';
+// const String version = '0.0.1';
 
-Info parse(List<String> a) {
+Config parse(List<String> a) {
   final parser = ArgParser()
     ..addOption('bc', abbr: 'e', help: '哔哩哔哩用户Cookie，用于风控校验')
     ..addOption('bm', abbr: 'm', help: '哔哩哔哩用户MemberID，用于获取用户空间信息')
@@ -32,11 +32,11 @@ Info parse(List<String> a) {
       }
     },
   );
-  return Info(parser.parse(a));
+  return Config(parser.parse(a));
 }
 
-class Info {
-  Info(ArgResults args)
+class Config {
+  Config(ArgResults args)
       : bilibiliCookie = args['bc']!,
         bilibiliMemberId = args['bm']!,
         youtubeOAuthClientId = args['yi']!,
@@ -91,7 +91,7 @@ class VideoPart {
 
 class Bilibili {
   Bilibili(this._info);
-  final Info _info;
+  final Config _info;
   static const String endpoint = 'https://api.bilibili.com';
   Map<String, String> get _headers => {
         'user-agent':
@@ -129,7 +129,7 @@ class Bilibili {
             if (body['code'] == 0) {
               return body;
             } else {
-              throw json;
+              throw body;
             }
           });
 
@@ -180,7 +180,7 @@ class Bilibili {
 
 class Youtube {
   Youtube(this._info);
-  final Info _info;
+  final Config _info;
   Future<AutoRefreshingAuthClient> _client() async {
     var client = http.Client();
     var id =

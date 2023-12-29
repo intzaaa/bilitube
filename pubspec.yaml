@@ -15,6 +15,11 @@ dependencies:
   googleapis_auth: ^1.4.1
   process_run: ^0.13.3
   dartx: ^1.2.0
+  uri: ^1.0.0
+  crypto: ^3.0.3
+  path: ^1.9.0
+  console: ^4.1.0
+  puppeteer: ^3.6.0
 
 dev_dependencies:
   lints: ^3.0.0

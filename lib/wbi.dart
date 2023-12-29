@@ -1,10 +1,85 @@
-import 'dart:convert';
-import 'package:crypto/crypto.dart';
-import 'package:http/http.dart' as http;
+library wbi;
 
-Future<String> encWbi(
-    Map<String, dynamic> params, String imgKey, String subKey) async {
-  final mixinKeyEncTab = [
+import 'dart:convert';
+import 'package:dartx/dartx.dart';
+import 'package:path/path.dart' as path;
+import 'package:http/http.dart' as http;
+import 'package:uri/uri.dart';
+
+void main(List<String> args) async {
+  final uri = await getWbiUri(
+      Uri.parse(args.isEmpty ? 'https://bilibili.com' : args[0]));
+  print(uri.query);
+}
+
+Future<Uri> getWbiUri(Uri originalUri) async {
+  // 构造 UriBuilder
+  final uri = UriBuilder.fromUri(originalUri);
+
+  // 移除已有的 wRid
+  if (uri.queryParameters['w_rid'] != null) uri.queryParameters.remove('w_rid');
+
+  // 获取wts
+  String? wts = uri.queryParameters['wts'];
+  if (wts != null) {
+    uri.queryParameters.remove('wts');
+  } else {
+    wts = (DateTime.now().millisecondsSinceEpoch / 1000).round().toString();
+  }
+
+  // 构造 http 客户端
+  final client = http.Client();
+
+  // 得到 imgKey 和 subKey
+  final (imgKey, subKey) = (await client
+      .get(Uri.parse('https://api.bilibili.com/x/web-interface/nav'))
+      .then((value) => jsonDecode(value.body))
+      .then((value) {
+    try {
+      return (
+        path.basenameWithoutExtension(value['data']['wbi_img']['img_url']),
+        path.basenameWithoutExtension(value['data']['wbi_img']['sub_url'])
+      );
+    } catch (e) {
+      throw value;
+    }
+  }));
+  // print('imgKey: $imgKey');
+  // print('subKey: $subKey');
+
+  // 拼接 imgKey 和 subKey
+  final rawWbiKey = imgKey + subKey;
+  final wbiKey = Sign.mixinKeyEncTab
+      .map((e) => rawWbiKey[e])
+      .join('')
+      // 截取前32位
+      .slice(0, 31);
+  // print('wbiKey: $wbiKey');
+
+  // 按键名升序排序
+  final String query = (uri.queryParameters..addAll({'wts': wts}))
+      .toList()
+      .sortedWith((a, b) => Comparable.compare(a.first, b.first))
+      .map((e) => '${e.first}=${e.second}')
+      .join('&');
+  // print('query: $query');
+
+  // URL Query 拼接 wbiKey 并计算 MD5，即为wRid
+  // print(uri.build().query + wbiKey);
+  final wRid = (query + wbiKey).md5;
+
+  // 将 wRid 添加到原 URL Query 中
+  uri.queryParameters.addAll({'w_rid': wRid, 'wts': wts});
+
+  // 关闭 http 客户端
+  client.close();
+
+  // 返回结果 Uri
+  return uri.build();
+}
+
+class Sign {
+  static const List<int> mixinKeyEncTab = [
     46,
     47,
     18,
@@ -70,51 +145,4 @@ Future<String> encWbi(
     44,
     52
   ];
-
-  String getMixinKey(String orig) {
-    return mixinKeyEncTab.map((n) => orig[n]).join('').substring(0, 32);
-  }
-
-  final mixinKey = getMixinKey(imgKey + subKey);
-  final currTime = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  final chrFilter = RegExp(r"[!'()*]");
-
-  params['wts'] = currTime; // Add wts field
-
-  final query = (params.keys.toList()..sort()) // Sort keys
-      .map((key) {
-    final value = params[key].toString().replaceAll(chrFilter, '');
-    return '${Uri.encodeComponent(key)}=${Uri.encodeComponent(value)}';
-  }).join('&');
-
-  final wbiSign =
-      md5.convert(utf8.encode(query + mixinKey)).toString(); // Calculate w_rid
-
-  return '$query&w_rid=$wbiSign';
-}
-
-Future<({String imgKey, String subKey})> getWbiKeys(String cookie) async {
-  final response = await http
-      .get(Uri.parse('https://api.bilibili.com/x/web-interface/nav'), headers: {
-    'Cookie': cookie,
-  });
-  final data = jsonDecode(response.body)['data'];
-  final imgUrl = data['wbi_img']['img_url'];
-  final subUrl = data['wbi_img']['sub_url'];
-
-  final String imgKey =
-      imgUrl.substring(imgUrl.lastIndexOf('/') + 1, imgUrl.lastIndexOf('.'));
-  final String subKey =
-      subUrl.substring(subUrl.lastIndexOf('/') + 1, subUrl.lastIndexOf('.'));
-
-  return (
-    imgKey: imgKey,
-    subKey: subKey,
-  );
-}
-
-Future<Uri> getWbiUri(final String cookie, Uri uri) async {
-  final webKeys = await getWbiKeys(cookie);
-  return Uri.parse(
-      '${uri.toString()}&img_key=${webKeys.imgKey}sub_key=&${webKeys.subKey}');
 }
