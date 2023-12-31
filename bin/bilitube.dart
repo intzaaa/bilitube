@@ -1,12 +1,13 @@
 import 'dart:io';
 import 'dart:convert';
+import 'package:args/args.dart';
 import 'package:dartx/dartx.dart';
+import 'package:logging/logging.dart';
 import 'package:http/http.dart' as http;
 import 'package:googleapis_auth/auth_io.dart';
 import 'package:googleapis/youtube/v3.dart' as yt;
-import 'package:args/args.dart';
 
-import 'package:bilitube/wbi.dart' show getWbiUri;
+import 'package:bilitube/wbi.dart';
 
 // const String version = '0.0.1';
 
@@ -20,7 +21,8 @@ Config parse(List<String> a) {
     ..addOption('yr',
         abbr: 'r', help: 'YouTubeApiOAuth验证方式的RefreshToken，用于获取AccessToken')
     ..addOption('yc', abbr: 'c', help: 'YouTube的ChannelID')
-    ..addOption('yd', abbr: 'd', help: 'YouTube的回退CategoryId，默认27');
+    ..addOption('yd', abbr: 'd', help: 'YouTube的回退CategoryId，默认27')
+    ..addFlag('log', abbr: 'l', help: '开启日志', defaultsTo: false);
   parser.addFlag(
     'help',
     abbr: 'h',
@@ -45,6 +47,7 @@ class Config {
         youtubeOAuthRefreshToken = args['yr']!,
         youtubeChannelId = args['yc']!,
         youtubeDefaultCategoryId = args['yd'] ?? 27,
+        log = (args['log'] as bool) ? Level.ALL : Level.WARNING,
         rawArgResult = args;
   String bilibiliCookie;
   String bilibiliMemberId;
@@ -54,32 +57,53 @@ class Config {
   String youtubeOAuthRefreshToken;
   String youtubeChannelId;
   String youtubeDefaultCategoryId;
+  Level log;
   ArgResults rawArgResult;
 }
 
 void main(List<String> input) async {
-  final info = parse(input.isEmpty ? (List.from(input)..add('-h')) : input);
-  final bilibili = Bilibili(info);
-  final youtube = Youtube(info);
-  print(bilibili.list);
+  final config = parse(input.isEmpty ? (List.from(input)..add('-h')) : input);
+  Logger.root.level = config.log;
+  final log = Logger('main');
+  log.onRecord.listen((event) {
+    print(
+        '[${event.time.toUtc().toIso8601String()}] ${event.level.name}: ${event.message}');
+  });
+  log.info('BiliTube已启动');
+
+  final bilibili = Bilibili(config);
+  final bilibiliList = await bilibili.list;
+  final youtube = Youtube(config);
+  final youtubeList = await youtube.list;
 }
 
-ProcessResult bbdown(String address) {
-  return Process.runSync(
-      'bbdown',
-      [
-        '$address --encoding-priority "av1,hevc,avc" -F bbdown-<bvid> -M bbdown-<bvid>-<cid>'
-      ],
-      runInShell: true);
+String jsonEncodeWithIndent(Object json) {
+  const JsonEncoder encoder = JsonEncoder.withIndent(' ');
+  return encoder.convert(json);
+}
+
+class BBdown {
+  BBdown(this.address);
+  String address;
+  Future<ProcessResult> download() async {
+    return await Process.run(
+        'bbdown',
+        [
+          '$address --encoding-priority "av1,hevc,avc" -F bbdown-<bvid> -M bbdown-<bvid>-<cid>'
+        ],
+        runInShell: true);
+  }
 }
 
 class Video {
-  Video(this.id, this.title, this.description, {this.categoryId, this.parts});
+  Video(this.id, this.title, this.description,
+      {this.categoryId, this.date, this.parts = const <VideoPart>[]});
   String id;
   String title;
+  DateTime? date;
   String description;
-  String? categoryId;
-  List<VideoPart>? parts;
+  int? categoryId;
+  List<VideoPart> parts;
 }
 
 class VideoPart {
@@ -90,8 +114,8 @@ class VideoPart {
 }
 
 class Bilibili {
-  Bilibili(this._info);
-  final Config _info;
+  Bilibili(this._config);
+  final Config _config;
   static const String endpoint = 'https://api.bilibili.com';
   Map<String, String> get _headers => {
         'user-agent':
@@ -110,18 +134,17 @@ class Bilibili {
         'sec-fetch-site': 'none',
         'sec-fetch-user': '?1',
         'upgrade-insecure-requests': '1',
-        'cookie': _info.bilibiliCookie,
+        'cookie': _config.bilibiliCookie,
         'referer': 'https://www.bilibili.com/'
       };
   Future<List<Video>> get list async {
-    final client = http.Client();
-    Future<List<Map>> getFullVList() async {
-      Future<Map> getSearchResults(int pn) async => await client
+    final log = Logger('BilibiliList');
+    Future<List<Map>> getVlist() async {
+      Future<Map> getSearchResults(int pn) async => await http
               .get(
-                  await getWbiUri(
-                      _info.bilibiliCookie,
-                      Uri.parse(
-                          '$endpoint/x/space/wbi/arc/search?mid=${_info.bilibiliMemberId}&pn=$pn')),
+                  await Uri.parse(
+                          '$endpoint/x/space/wbi/arc/search?mid=${_config.bilibiliMemberId}&pn=$pn')
+                      .toWbiUri(),
                   headers: _headers)
               .catchError((err) => throw err)
               .then((value) => jsonDecode(value.body))
@@ -132,27 +155,33 @@ class Bilibili {
               throw body;
             }
           });
-
       List<Map> vlist = [];
-      final initRes = await getSearchResults(1);
-      vlist.add(initRes['data']['list']['vlist']);
-      for (var pn = 2;
-          pn <= int.parse(initRes['data']['page']['count']);
-          pn = pn + 1) {
-        vlist.add((await getSearchResults(pn))['data']['list']['vlist']);
+      int pn = 1;
+      final firstPage = await getSearchResults(pn);
+      final int pageCount = firstPage['data']['page']['count'];
+      logPage(int pn, int pageCount) =>
+          log.info('正在获取哔哩哔哩用户视频，已获取 $pn 页，共 $pageCount 页');
+      logPage(pn, pageCount);
+      vlist.addAll(
+          (firstPage['data']['list']['vlist'] as List).whereType<Map>());
+      for (pn + 1; pn <= pageCount; pn = pn + 1) {
+        vlist.addAll(
+            ((await getSearchResults(pn))['data']['list']['vlist'] as List)
+                .whereType<Map>());
+        logPage(pn, pageCount);
       }
       return vlist;
     }
 
-    var vlist = await getFullVList();
+    final vlist = await getVlist();
 
     List<Video> videoList = [];
-    vlist.forEachIndexed((item, index) {
+    for (var item in vlist) {
       videoList.add(Video(item['bvid'], item['title'], item['description'],
           categoryId: item['typeid']));
-    });
+    }
 
-    Future<List<Map>> getParts(String bvid) async => await client
+    Future<List<Map>> getParts(String bvid) async => await http
             .get(
                 Uri.parse(
                     'https://api.bilibili.com/x/player/pagelist?bvid=$bvid'),
@@ -161,33 +190,40 @@ class Bilibili {
             .then((value) => jsonDecode(value.body))
             .then((body) {
           if (body['code'] == 0) {
-            return body['data'];
+            return (body['data'] as List).whereType<Map>().toList();
           } else {
-            throw json;
+            throw body;
           }
         });
-    videoList.forEachIndexed((item, index) async {
+    logVideo(String title, int partCount) =>
+        log.info('已获取 $title 的各个P的信息，共 $partCount 个P');
+    for (final item in videoList) {
       final parts = await getParts(item.id);
       List<VideoPart> list = [];
-      parts.forEachIndexed((part, index) {
-        list.add(VideoPart(part['cid'], part['part']));
-      });
+      logVideo(item.title, parts.length);
+      for (final part in parts) {
+        list.add(VideoPart(part['cid'].toString(), part['part']));
+      }
       item.parts = list;
-    });
+    }
+    log.info('已获取到哔哩哔哩用户视频的全部信息如下\n${jsonEncodeWithIndent(videoList.map((e) => [
+          '${e.id}-${e.title}',
+          e.parts.map((e) => '${e.cid}-${e.title}').toList()
+        ]).toList())}');
     return videoList;
   }
 }
 
 class Youtube {
-  Youtube(this._info);
-  final Config _info;
+  Youtube(this._config);
+  final Config _config;
   Future<AutoRefreshingAuthClient> _client() async {
     var client = http.Client();
-    var id =
-        ClientId(_info.youtubeOAuthClientId, _info.youtubeOAuthClientSecret);
+    var id = ClientId(
+        _config.youtubeOAuthClientId, _config.youtubeOAuthClientSecret);
     var credentials = AccessCredentials(
-        AccessToken('Bearer', _info.youtubeOAuthAccessToken, DateTime.now()),
-        _info.youtubeOAuthRefreshToken, [
+        AccessToken('Bearer', _config.youtubeOAuthAccessToken, DateTime.now()),
+        _config.youtubeOAuthRefreshToken, [
       'https://www.googleapis.com/auth/youtube',
       'https://www.googleapis.com/auth/youtube.force-ssl',
       'https://www.googleapis.com/auth/youtube.channel-memberships.creator',
@@ -203,10 +239,10 @@ class Youtube {
     final youtube = yt.YouTubeApi(client);
     // https://developers.google.com/youtube/v3/docs/search/list#parameters
     final res = await youtube.search
-        .list(['snippet'], channelId: _info.youtubeChannelId);
+        .list(['snippet'], channelId: _config.youtubeChannelId);
     var items = res.items!.where((element) => element.id!.videoId != null);
     List<Video> list = [];
-    for (var item in items) {
+    for (final item in items) {
       list.add(Video(
           item.id!.videoId!, item.snippet!.title!, item.snippet!.description!));
     }
@@ -221,9 +257,9 @@ class Youtube {
     final video = yt.Video(
         snippet: yt.VideoSnippet()
           ..title = item.title
-          ..channelId = _info.youtubeChannelId
+          ..channelId = _config.youtubeChannelId
           ..description = '${item.description}\n(${item.id.hashCode})'
-          ..categoryId = item.categoryId);
+          ..categoryId = item.categoryId.toString());
     final media = yt.Media(stream, streamLength);
     await youtube.videos.insert(video, ['snippet'], uploadMedia: media);
     client.close();
